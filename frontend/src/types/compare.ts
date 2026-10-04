@@ -1,4 +1,5 @@
 import type { Rating } from './rating'
+import type { TrendDirection } from './rating'
 
 /** 比测判定结论 */
 export type CompareVerdict = '合格' | '超限'
@@ -11,6 +12,10 @@ export interface Compare {
   id: string
   /** 被比测的关系点据 */
   ratingId: string
+  /** 产生曲线流量的已确认绳套曲线 id（曲线版本可追溯） */
+  curveId: string | null
+  /** 比测所走的分支（涨水 / 退水） */
+  branch: TrendDirection
   /** 实测流量（m³/s） */
   measuredFlow: number
   /** 曲线流量（m³/s） */
@@ -42,6 +47,7 @@ export function calcDeviationPct(measuredFlow: number, curveFlowValue: number): 
 export interface CompareRow {
   compare: Compare
   rating: Rating | null
+  stationId: string
   stationName: string
   lineNo: string
 }

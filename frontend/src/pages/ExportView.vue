@@ -32,11 +32,13 @@ import {
   remapIds,
   validateBackup
 } from '@/utils/export'
-import { fitPowerCurve } from '@/types/rating'
+import { useReviewStore } from '@/stores/reviewStore'
 
 const ratingStore = useRatingStore()
 const stationStore = useStationStore()
 const sectionStore = useSectionStore()
+const reviewStore = useReviewStore()
+reviewStore.start()
 
 const counts = ref<Record<string, number>>({})
 const lastBackupAt = ref<string | null>(null)
@@ -48,8 +50,12 @@ const exporting = ref(false)
 
 const compareRows = computed(() => ratingStore.compareRows)
 const overLimitRows = computed(() => ratingStore.overLimitRows)
+const curvesConfirmed = computed(
+  () => reviewStore.curves.filter((curve) => curve.status === '已确认').length
+)
+const openBatchCount = computed(() => reviewStore.openBatches.length)
 
-/** 检测结论：按测站汇总测次、最新水位、定线参数与超限点据 */
+/** 检测结论：按测站汇总测次、最新水位、当前绳套曲线与超限点据 */
 const conclusions = ref<
   Array<{
     stationId: string
@@ -71,15 +77,7 @@ async function refreshCounts(): Promise<void> {
 
 async function buildConclusions(): Promise<void> {
   const payload = await buildBackupPayload()
-  const fits = ratingStore.lineNos.map((lineNo) =>
-    fitPowerCurve(
-      payload.ratings
-        .filter((rating) => rating.lineNo === lineNo)
-        .map((rating) => ({ stageM: rating.stageM, flowM3s: rating.flowM3s })),
-      lineNo
-    )
-  )
-  conclusions.value = buildConclusionLines(payload, fits)
+  conclusions.value = buildConclusionLines(payload, payload.ratingCurves)
 }
 
 async function handleExport(): Promise<void> {
@@ -149,10 +147,9 @@ async function handleReset(): Promise<void> {
 }
 
 async function refreshAll(): Promise<void> {
-  await ratingStore.rebuildCompares(ratingStore.activeLineNo)
   await refreshCounts()
   await buildConclusions()
-  ElMessage.success('已重新定线并刷新结构版本信息')
+  ElMessage.success('已刷新结构版本与定线成果信息')
 }
 
 onMounted(() => {
@@ -180,14 +177,15 @@ onMounted(() => {
     <div class="gb-stats-row">
       <StatBadge label="测站" :value="counts.stations ?? 0" suffix="站" icon="Odometer" />
       <StatBadge label="断面测次" :value="counts.sections ?? 0" suffix="次" icon="Files" tone="info" />
-      <StatBadge label="流速测点" :value="counts.points ?? 0" suffix="点" icon="DataLine" tone="success" />
+      <StatBadge label="已确认绳套曲线" :value="curvesConfirmed" suffix="条" icon="TrendCharts" tone="info" />
+      <StatBadge label="复核批次" :value="openBatchCount" suffix="批进行中" icon="Warning" tone="warning" />
       <StatBadge
         label="比测合格率"
         :value="ratingStore.fitQuality.qualifyRatePct"
         suffix="%"
         :percent="ratingStore.fitQuality.qualifyRatePct"
         :tone="ratingStore.fitQuality.overLimitCount > 0 ? 'warning' : 'success'"
-        icon="TrendCharts"
+        icon="DataLine"
       />
     </div>
 
@@ -248,9 +246,17 @@ onMounted(() => {
         <el-table-column label="测站" min-width="130">
           <template #default="{ row }">{{ row.stationName }}</template>
         </el-table-column>
-        <el-table-column label="定线号" width="90" align="center">
+        <el-table-column label="定线号 / 分支" width="120" align="center">
           <template #default="{ row }">
             <el-tag size="small" effect="plain">{{ row.lineNo }}</el-tag>
+            <el-tag
+              size="small"
+              effect="plain"
+              :type="row.compare.branch === '涨水' ? 'danger' : row.compare.branch === '退水' ? 'primary' : 'info'"
+              class="page__branch-tag"
+            >
+              {{ row.compare.branch }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="水位 (m)" width="110" align="right">
@@ -290,7 +296,8 @@ onMounted(() => {
       <div class="gb-panel-title">
         <h3>全量 JSON 导入导出</h3>
         <span class="gb-hint">
-          导出内容包含 stations / sections / verticals / points / ratings / compares 六张表
+          导出内容包含 stations / sections / verticals / points / ratings / ratingCurves / reviewBatches / compares 八张表，
+          点据来源、流量快照、涨退方向、复核状态与曲线版本一并携带
         </span>
       </div>
 
@@ -334,6 +341,9 @@ onMounted(() => {
         <el-descriptions-item label="点据 / 比测">
           {{ counts.ratings ?? 0 }} / {{ counts.compares ?? 0 }}
         </el-descriptions-item>
+        <el-descriptions-item label="曲线 / 复核批次">
+          {{ counts.ratingCurves ?? 0 }} / {{ counts.reviewBatches ?? 0 }}
+        </el-descriptions-item>
         <el-descriptions-item label="最近备份时间">
           {{ lastBackupAt ? new Date(lastBackupAt).toLocaleString('zh-CN') : '尚未备份' }}
         </el-descriptions-item>
@@ -372,5 +382,9 @@ onMounted(() => {
 .page__danger {
   color: #c0392b;
   font-weight: 700;
+}
+
+.page__branch-tag {
+  margin-left: 4px;
 }
 </style>

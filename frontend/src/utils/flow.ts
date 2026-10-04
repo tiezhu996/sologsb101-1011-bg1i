@@ -96,9 +96,11 @@ export function calcSectionDischarge(input: VerticalSlice[]): DischargeResult {
   const slices = verticals.map((vertical, index) => {
     const previous = verticals[index - 1]
     const next = verticals[index + 1]
-    const leftSpan = previous ? (vertical.startDistanceM - previous.startDistanceM) / 2 : 0
-    const rightSpan = next ? (next.startDistanceM - vertical.startDistanceM) / 2 : 0
-    const span = index === 0 || index === verticals.length - 1 ? leftSpan + rightSpan : leftSpan + rightSpan
+    // mid-section：每条垂线分到左右各半个间距；首末垂线把靠岸一侧的半间距也计入，
+    // 保证各垂线部分宽度之和等于断面总宽（旧实现漏掉首末垂线靠岸半宽，小断面流量偏小）。
+    const leftSpan = previous ? (vertical.startDistanceM - previous.startDistanceM) / 2 : next ? (next.startDistanceM - vertical.startDistanceM) / 2 : 0
+    const rightSpan = next ? (next.startDistanceM - vertical.startDistanceM) / 2 : previous ? (vertical.startDistanceM - previous.startDistanceM) / 2 : 0
+    const span = leftSpan + rightSpan
     const partialAreaM2 = round(vertical.depthM * span, 3)
     const partialFlow = round(partialAreaM2 * vertical.meanVelocityMs, 3)
     return { id: vertical.id, no: vertical.no, partialAreaM2, partialFlow }

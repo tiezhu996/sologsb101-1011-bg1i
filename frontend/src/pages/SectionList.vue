@@ -124,7 +124,7 @@ async function submitForm(): Promise<void> {
     }
     if (editingId.value) {
       await sectionStore.updateSection(editingId.value, payload)
-      ElMessage.success('测次已更新')
+      ElMessage.success('测次已更新；来源于该测次的关系点据保留旧值，旧绳套曲线已失效，请在关系点据页复核重算')
     } else {
       const created = await sectionStore.createSection(payload)
       sectionStore.selectSection(created.id)

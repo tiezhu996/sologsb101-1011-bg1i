@@ -9,6 +9,7 @@ import { DataLine, Files, Histogram, Odometer, PieChart, TrendCharts } from '@el
 import { useStationStore } from '@/stores/stationStore'
 import { useSectionStore } from '@/stores/sectionStore'
 import { useRatingStore } from '@/stores/ratingStore'
+import { useReviewStore } from '@/stores/reviewStore'
 import { DB_NAME, DB_VERSION } from '@/utils/db'
 
 const route = useRoute()
@@ -16,11 +17,13 @@ const router = useRouter()
 const stationStore = useStationStore()
 const sectionStore = useSectionStore()
 const ratingStore = useRatingStore()
+const reviewStore = useReviewStore()
 
 onMounted(() => {
   stationStore.start()
   sectionStore.start()
   ratingStore.start()
+  reviewStore.start()
 })
 
 /** 层级路由统一归属到最上层导航项 */
