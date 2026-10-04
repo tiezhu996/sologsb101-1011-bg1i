@@ -33,6 +33,7 @@ const form = reactive({
   startDistanceM: 0,
   stageM: 0,
   method: '流速仪' as MeasureMethod,
+  trend: '涨水' as '涨水' | '退水' | '未知',
   measuredAt: new Date().toISOString().slice(0, 16)
 })
 
@@ -81,6 +82,7 @@ function openCreate(): void {
   form.startDistanceM = stats.value.latest?.startDistanceM ?? 0
   form.stageM = stats.value.latest?.stageM ?? 0
   form.method = '流速仪'
+  form.trend = '涨水'
   form.measuredAt = new Date().toISOString().slice(0, 16)
   dialogVisible.value = true
 }
@@ -91,6 +93,7 @@ function openEdit(section: Section): void {
   form.startDistanceM = section.startDistanceM
   form.stageM = section.stageM
   form.method = section.method
+  form.trend = section.trend
   form.measuredAt = section.measuredAt.slice(0, 16)
   dialogVisible.value = true
 }
@@ -120,6 +123,7 @@ async function submitForm(): Promise<void> {
       startDistanceM: form.startDistanceM,
       stageM: form.stageM,
       method: form.method,
+      trend: form.trend,
       measuredAt: new Date(form.measuredAt).toISOString()
     }
     if (editingId.value) {
@@ -281,6 +285,13 @@ onMounted(() => {
             </el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="水势" width="90" align="center">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.trend === '退水' ? 'warning' : row.trend === '涨水' ? 'success' : 'info'" effect="plain">
+              {{ row.trend }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="水位 (m)" width="110" align="right">
           <template #default="{ row }">
             <span class="gb-mono">{{ row.stageM.toFixed(2) }}</span>
@@ -329,6 +340,13 @@ onMounted(() => {
         <el-form-item label="测法" required>
           <el-radio-group v-model="form.method">
             <el-radio-button v-for="method in MEASURE_METHODS" :key="method" :value="method">{{ method }}</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item label="水势方向" required>
+          <el-radio-group v-model="form.trend">
+            <el-radio-button value="涨水">涨水</el-radio-button>
+            <el-radio-button value="退水">退水</el-radio-button>
+            <el-radio-button value="未知">未知</el-radio-button>
           </el-radio-group>
         </el-form-item>
         <el-form-item label="水位" required>

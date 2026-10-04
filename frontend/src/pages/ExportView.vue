@@ -32,7 +32,6 @@ import {
   remapIds,
   validateBackup
 } from '@/utils/export'
-import { fitPowerCurve } from '@/types/rating'
 
 const ratingStore = useRatingStore()
 const stationStore = useStationStore()
@@ -71,14 +70,13 @@ async function refreshCounts(): Promise<void> {
 
 async function buildConclusions(): Promise<void> {
   const payload = await buildBackupPayload()
-  const fits = ratingStore.lineNos.map((lineNo) =>
-    fitPowerCurve(
-      payload.ratings
-        .filter((rating) => rating.lineNo === lineNo)
-        .map((rating) => ({ stageM: rating.stageM, flowM3s: rating.flowM3s })),
-      lineNo
-    )
-  )
+  const fits = payload.ratingCurves
+    .filter((curve) => curve.status === 'confirmed')
+    .map((curve) => ({
+      ...curve.fit,
+      lineNo: curve.lineNo,
+      branch: curve.branch
+    }))
   conclusions.value = buildConclusionLines(payload, fits)
 }
 
@@ -149,10 +147,9 @@ async function handleReset(): Promise<void> {
 }
 
 async function refreshAll(): Promise<void> {
-  await ratingStore.rebuildCompares(ratingStore.activeLineNo)
   await refreshCounts()
   await buildConclusions()
-  ElMessage.success('已重新定线并刷新结构版本信息')
+  ElMessage.success('已刷新结构版本、曲线版本和比测结果')
 }
 
 onMounted(() => {
@@ -253,6 +250,13 @@ onMounted(() => {
             <el-tag size="small" effect="plain">{{ row.lineNo }}</el-tag>
           </template>
         </el-table-column>
+        <el-table-column label="分支" width="90" align="center">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.compare.branch === '退水' ? 'warning' : 'success'" effect="plain">
+              {{ row.compare.branch || row.rating?.direction || '—' }}
+            </el-tag>
+          </template>
+        </el-table-column>
         <el-table-column label="水位 (m)" width="110" align="right">
           <template #default="{ row }">
             <span class="gb-mono">{{ row.rating ? row.rating.stageM.toFixed(2) : '—' }}</span>
@@ -290,7 +294,7 @@ onMounted(() => {
       <div class="gb-panel-title">
         <h3>全量 JSON 导入导出</h3>
         <span class="gb-hint">
-          导出内容包含 stations / sections / verticals / points / ratings / compares 六张表
+          导出内容包含 stations / sections / verticals / points / ratings / ratingCurves / reviewBatches / compares 八张表，并携带来源快照、方向、复核状态与曲线版本。
         </span>
       </div>
 
@@ -331,9 +335,10 @@ onMounted(() => {
         <el-descriptions-item label="垂线 / 测点">
           {{ counts.verticals ?? 0 }} / {{ counts.points ?? 0 }}
         </el-descriptions-item>
-        <el-descriptions-item label="点据 / 比测">
-          {{ counts.ratings ?? 0 }} / {{ counts.compares ?? 0 }}
+        <el-descriptions-item label="点据 / 曲线 / 比测">
+          {{ counts.ratings ?? 0 }} / {{ counts.ratingCurves ?? 0 }} / {{ counts.compares ?? 0 }}
         </el-descriptions-item>
+        <el-descriptions-item label="复核批次">{{ counts.reviewBatches ?? 0 }}</el-descriptions-item>
         <el-descriptions-item label="最近备份时间">
           {{ lastBackupAt ? new Date(lastBackupAt).toLocaleString('zh-CN') : '尚未备份' }}
         </el-descriptions-item>

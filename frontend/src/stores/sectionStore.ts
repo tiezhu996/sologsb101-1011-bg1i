@@ -188,17 +188,112 @@ export const useSectionStore = defineStore('section', () => {
   }
 
   async function updateSection(id: string, patch: Partial<Section>): Promise<void> {
-    await db.sections.update(id, { ...patch, updatedAt: Date.now() } as never)
+    await db.transaction('rw', [db.sections, db.ratings, db.ratingCurves], async () => {
+      await db.sections.update(id, { ...patch, updatedAt: Date.now() } as never)
+      const section = await db.sections.get(id)
+      if (section) {
+        const timestamp = Date.now()
+        await db.ratings
+          .where('stationId')
+          .equals(section.stationId)
+          .modify((rating) => {
+            if (rating.sourceRef?.sectionId !== id) return
+            rating.status = 'stale'
+            rating.staleReason = '原始断面测次已补录或重测，等待来源快照复核'
+            rating.updatedAt = timestamp
+          })
+        const curveIds = new Set(
+          (
+            await db.ratings
+              .where('stationId')
+              .equals(section.stationId)
+              .filter((rating) => rating.sourceRef?.sectionId === id && Boolean(rating.confirmedCurveId))
+              .toArray()
+          ).map((rating) => rating.confirmedCurveId as string)
+        )
+        if (curveIds.size > 0) {
+          await db.ratingCurves.bulkPut(
+            (await db.ratingCurves.where('id').anyOf(Array.from(curveIds)).toArray()).map((curve) =>
+              curve.status === 'confirmed'
+                ? { ...curve, status: 'invalid', reviewNote: '原始测次更新，旧定线失效，等待复核重算', updatedAt: timestamp }
+                : curve
+            )
+          )
+        }
+      }
+    })
   }
 
   async function removeSection(id: string): Promise<void> {
-    await db.transaction('rw', [db.sections, db.verticals, db.points], async () => {
+    const section = sections.value.find((item) => item.id === id)
+    await db.transaction('rw', [db.sections, db.verticals, db.points, db.ratings, db.ratingCurves], async () => {
       const verticalIds = (await db.verticals.where('sectionId').equals(id).toArray()).map((row) => row.id)
       if (verticalIds.length > 0) {
         await db.points.where('verticalId').anyOf(verticalIds).delete()
         await db.verticals.bulkDelete(verticalIds)
       }
+      if (section) {
+        const timestamp = Date.now()
+        const affectedRatings = await db.ratings
+          .where('stationId')
+          .equals(section.stationId)
+          .filter((rating) => rating.sourceRef?.sectionId === id)
+          .toArray()
+        await db.ratings.bulkPut(
+          affectedRatings.map((rating) => ({
+            ...rating,
+            status: 'stale' as const,
+            staleReason: '来源断面已删除',
+            updatedAt: timestamp
+          }))
+        )
+        const curveIds = new Set(
+          affectedRatings.filter((rating) => rating.confirmedCurveId).map((rating) => rating.confirmedCurveId as string)
+        )
+        await db.ratingCurves.bulkPut(
+          (await db.ratingCurves.where('id').anyOf(Array.from(curveIds)).toArray()).map((curve) =>
+            curve.status === 'confirmed'
+              ? { ...curve, status: 'invalid' as const, reviewNote: '来源断面已删除，旧定线失效', updatedAt: timestamp }
+              : curve
+          )
+        )
+      }
       await db.sections.delete(id)
+    })
+  }
+
+  async function markRatingsStaleForVertical(verticalId: string, reason: string): Promise<void> {
+    const vertical = await db.verticals.get(verticalId)
+    if (!vertical) return
+    const section = await db.sections.get(vertical.sectionId)
+    if (!section) return
+    const timestamp = Date.now()
+    await db.transaction('rw', [db.ratings, db.ratingCurves], async () => {
+      const affectedRatings = await db.ratings
+        .where('stationId')
+        .equals(section.stationId)
+        .filter((rating) => rating.sourceRef?.sectionId === section.id)
+        .toArray()
+      await db.ratings.bulkPut(
+        affectedRatings.map((rating) => {
+          const refsVertical = !rating.sourceRef?.verticalId || rating.sourceRef.verticalId === verticalId
+          return refsVertical
+            ? { ...rating, status: 'stale' as const, staleReason: reason, updatedAt: timestamp }
+            : rating
+        })
+      )
+      const affectedCurveIds = new Set(
+        affectedRatings
+          .filter((rating) => (!rating.sourceRef?.verticalId || rating.sourceRef.verticalId === verticalId) && rating.confirmedCurveId)
+          .map((rating) => rating.confirmedCurveId as string)
+      )
+      await db.ratingCurves.bulkPut(
+        (await db.ratingCurves.where('id').anyOf(Array.from(affectedCurveIds)).toArray()).map((curve) =>
+          curve.status === 'confirmed'
+            ? { ...curve, status: 'invalid' as const, reviewNote: reason, updatedAt: timestamp }
+            : curve
+        )
+      )
     })
   }
 
@@ -228,10 +323,12 @@ export const useSectionStore = defineStore('section', () => {
   }
 
   async function updateVertical(id: string, patch: Partial<Vertical>): Promise<void> {
+    await markRatingsStaleForVertical(id, '来源垂线已重测或补录，等待复核')
     await db.verticals.update(id, { ...patch, updatedAt: Date.now() } as never)
   }
 
   async function removeVertical(id: string): Promise<void> {
+    await markRatingsStaleForVertical(id, '来源垂线已删除，旧定线失效')
     await db.transaction('rw', [db.verticals, db.points], async () => {
       await db.points.where('verticalId').equals(id).delete()
       await db.verticals.delete(id)
@@ -256,6 +353,7 @@ export const useSectionStore = defineStore('section', () => {
         updatedAt: now + index
       }
     })
+    await markRatingsStaleForVertical(verticalId, '垂线测点已重排或重测，等待复核')
     await db.transaction('rw', [db.verticals, db.points], async () => {
       await db.points.where('verticalId').equals(verticalId).delete()
       if (rows.length > 0) await db.points.bulkPut(rows)
@@ -278,18 +376,27 @@ export const useSectionStore = defineStore('section', () => {
   }
 
   async function updatePoint(id: string, patch: Partial<Point>): Promise<void> {
+    await markRatingsStaleForPoint(id, '来源测点流速或权重已重测，等待复核')
     await db.points.update(id, { ...patch, updatedAt: Date.now() } as never)
   }
 
   async function removePoint(id: string): Promise<void> {
     const point = points.value.find((item) => item.id === id)
+    if (point) await markRatingsStaleForPoint(id, '来源测点已删除，旧定线失效')
     await db.points.delete(id)
     if (point) await syncVerticalPointCount(point.verticalId)
+  }
+
+  async function markRatingsStaleForPoint(pointId: string, reason: string): Promise<void> {
+    const point = await db.points.get(pointId)
+    if (!point) return
+    await markRatingsStaleForVertical(point.verticalId, reason)
   }
 
   /** 批量改写某垂线全部测点流速（批量录入） */
   async function bulkSetVelocity(verticalId: string, velocityMs: number): Promise<number> {
     const now = Date.now()
+    await markRatingsStaleForVertical(verticalId, '批量改写测点流速，等待复核')
     await db.points
       .where('verticalId')
       .equals(verticalId)
@@ -316,6 +423,7 @@ export const useSectionStore = defineStore('section', () => {
       createdAt: now + index,
       updatedAt: now + index
     }))
+    await markRatingsStaleForVertical(verticalId, '批量导入测点，等待复核')
     await db.transaction('rw', [db.verticals, db.points], async () => {
       await db.points.where('verticalId').equals(verticalId).delete()
       await db.points.bulkPut(records)
@@ -334,6 +442,7 @@ export const useSectionStore = defineStore('section', () => {
     const rows = pointsOfVertical(verticalId)
     if (rows.length === 0) return 0
     const weight = Number((1 / rows.length).toFixed(4))
+    await markRatingsStaleForVertical(verticalId, '测点权重已归一化，等待复核')
     await db.points.bulkPut(rows.map((row) => ({ ...row, weight, updatedAt: Date.now() })))
     return rows.length
   }

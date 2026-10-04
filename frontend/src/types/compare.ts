@@ -1,4 +1,5 @@
 import type { Rating } from './rating'
+import type { RatingDirection } from './ratingDirection'
 
 /** 比测判定结论 */
 export type CompareVerdict = '合格' | '超限'
@@ -11,6 +12,12 @@ export interface Compare {
   id: string
   /** 被比测的关系点据 */
   ratingId: string
+  /** 产生该比测结果的已确认曲线；历史手工记录可为空 */
+  curveId?: string | null
+  /** 涨水 / 退水分支 */
+  branch?: RatingDirection
+  /** 绳套定线号 */
+  lineNo?: string
   /** 实测流量（m³/s） */
   measuredFlow: number
   /** 曲线流量（m³/s） */

@@ -13,7 +13,16 @@ import {
 } from '@/utils/db'
 
 /** 备份集合键名 */
-export const BACKUP_KEYS = ['stations', 'sections', 'verticals', 'points', 'ratings', 'compares'] as const
+export const BACKUP_KEYS = [
+  'stations',
+  'sections',
+  'verticals',
+  'points',
+  'ratings',
+  'ratingCurves',
+  'reviewBatches',
+  'compares'
+] as const
 export type BackupKey = (typeof BACKUP_KEYS)[number]
 
 /** 各表行数统计（导出页展示与导入结果回执共用） */
@@ -21,12 +30,14 @@ export type CountMap = Record<BackupKey, number>
 
 /** 组装当前本地数据的完整快照 */
 export async function buildBackupPayload(): Promise<BackupPayload> {
-  const [stations, sections, verticals, points, ratings, compares] = await Promise.all([
+  const [stations, sections, verticals, points, ratings, ratingCurves, reviewBatches, compares] = await Promise.all([
     db.stations.toArray(),
     db.sections.toArray(),
     db.verticals.toArray(),
     db.points.toArray(),
     db.ratings.toArray(),
+    db.ratingCurves.toArray(),
+    db.reviewBatches.toArray(),
     db.compares.toArray()
   ])
   return {
@@ -38,6 +49,8 @@ export async function buildBackupPayload(): Promise<BackupPayload> {
     verticals,
     points,
     ratings,
+    ratingCurves,
+    reviewBatches,
     compares
   }
 }
@@ -53,19 +66,44 @@ export function validateBackup(input: unknown): { ok: boolean; errors: string[];
     errors.push('app 字段应为 gbhydrogaug，文件来源不明')
   }
   for (const key of BACKUP_KEYS) {
-    if (!Array.isArray(obj[key])) errors.push(`${key} 字段缺失或不是数组`)
+    if (!['ratingCurves', 'reviewBatches'].includes(key) && !Array.isArray(obj[key])) {
+      errors.push(`${key} 字段缺失或不是数组`)
+    }
+  }
+  for (const key of ['ratingCurves', 'reviewBatches'] as const) {
+    if (obj[key] !== undefined && !Array.isArray(obj[key])) errors.push(`${key} 字段应为数组`)
   }
   if (errors.length > 0) return { ok: false, errors, payload: null }
   const payload: BackupPayload = {
     app: 'gbhydrogaug',
     dbVersion: typeof obj.dbVersion === 'number' ? obj.dbVersion : DB_VERSION,
     exportedAt: typeof obj.exportedAt === 'string' ? obj.exportedAt : new Date().toISOString(),
+    sections: (obj.sections ?? []).map((section) => ({
+      ...section,
+      trend: section.trend === '涨水' || section.trend === '退水' ? section.trend : '未知'
+    })),
+    ratings: (obj.ratings ?? []).map((rating) => ({
+      ...rating,
+      direction: rating.direction === '涨水' || rating.direction === '退水' ? rating.direction : '未知',
+      status: rating.status === 'confirmed' || rating.status === 'stale' ? rating.status : 'pending',
+      sourceRef: rating.sourceRef ?? null,
+      sourceSnapshot: rating.sourceSnapshot ?? null,
+      sourceSnapshotAt: rating.sourceSnapshotAt ?? null,
+      staleReason: rating.staleReason ?? '',
+      confirmedCurveId: rating.confirmedCurveId ?? null,
+      confirmedAt: rating.confirmedAt ?? null
+    })),
+    ratingCurves: obj.ratingCurves ?? [],
+    reviewBatches: obj.reviewBatches ?? [],
+    compares: (obj.compares ?? []).map((compare) => ({
+      ...compare,
+      curveId: compare.curveId ?? null,
+      branch: compare.branch === '涨水' || compare.branch === '退水' ? compare.branch : '未知',
+      lineNo: compare.lineNo ?? ''
+    })),
     stations: obj.stations ?? [],
-    sections: obj.sections ?? [],
     verticals: obj.verticals ?? [],
-    points: obj.points ?? [],
-    ratings: obj.ratings ?? [],
-    compares: obj.compares ?? []
+    points: obj.points ?? []
   }
   return { ok: true, errors, payload }
 }
@@ -78,6 +116,8 @@ export function countPayload(payload: BackupPayload): CountMap {
     verticals: payload.verticals.length,
     points: payload.points.length,
     ratings: payload.ratings.length,
+    ratingCurves: payload.ratingCurves.length,
+    reviewBatches: payload.reviewBatches.length,
     compares: payload.compares.length
   }
 }
@@ -116,13 +156,15 @@ export async function importBackup(payload: BackupPayload, overwrite: boolean): 
   if (overwrite) await clearAllTables()
   await db.transaction(
     'rw',
-    [db.stations, db.sections, db.verticals, db.points, db.ratings, db.compares],
+    [db.stations, db.sections, db.verticals, db.points, db.ratings, db.ratingCurves, db.reviewBatches, db.compares],
     async () => {
       await db.stations.bulkPut(payload.stations)
       await db.sections.bulkPut(payload.sections)
       await db.verticals.bulkPut(payload.verticals)
       await db.points.bulkPut(payload.points)
       await db.ratings.bulkPut(payload.ratings)
+      await db.ratingCurves.bulkPut(payload.ratingCurves)
+      await db.reviewBatches.bulkPut(payload.reviewBatches)
       await db.compares.bulkPut(payload.compares)
     }
   )
@@ -135,6 +177,9 @@ export function remapIds(payload: BackupPayload): BackupPayload {
   const sectionMap = new Map<string, string>()
   const verticalMap = new Map<string, string>()
   const ratingMap = new Map<string, string>()
+  const pointMap = new Map<string, string>()
+  const curveMap = new Map<string, string>()
+  const batchMap = new Map<string, string>()
 
   const stations = payload.stations.map((station) => {
     const id = createId('stn')
@@ -151,22 +196,144 @@ export function remapIds(payload: BackupPayload): BackupPayload {
     verticalMap.set(vertical.id, id)
     return { ...vertical, id, sectionId: sectionMap.get(vertical.sectionId) ?? vertical.sectionId }
   })
-  const points = payload.points.map((point) => ({
-    ...point,
-    id: createId('pnt'),
-    verticalId: verticalMap.get(point.verticalId) ?? point.verticalId
-  }))
+  const points = payload.points.map((point) => {
+    const id = createId('pnt')
+    pointMap.set(point.id, id)
+    return {
+      ...point,
+      id,
+      verticalId: verticalMap.get(point.verticalId) ?? point.verticalId
+    }
+  })
   const ratings = payload.ratings.map((rating) => {
     const id = createId('rat')
     ratingMap.set(rating.id, id)
-    return { ...rating, id, stationId: stationMap.get(rating.stationId) ?? rating.stationId }
+    return {
+      ...rating,
+      id,
+      stationId: stationMap.get(rating.stationId) ?? rating.stationId,
+      sourceRef: rating.sourceRef
+        ? {
+            sectionId: sectionMap.get(rating.sourceRef.sectionId) ?? rating.sourceRef.sectionId,
+            verticalId: rating.sourceRef.verticalId
+              ? verticalMap.get(rating.sourceRef.verticalId) ?? rating.sourceRef.verticalId
+              : undefined,
+            pointId: rating.sourceRef.pointId
+              ? pointMap.get(rating.sourceRef.pointId) ?? rating.sourceRef.pointId
+              : undefined
+          }
+        : rating.sourceRef,
+      sourceSnapshot: rating.sourceSnapshot
+        ? {
+            ...rating.sourceSnapshot,
+            section: rating.sourceSnapshot.section
+              ? {
+                  ...rating.sourceSnapshot.section,
+                  id: sectionMap.get(rating.sourceSnapshot.section.id) ?? rating.sourceSnapshot.section.id
+                }
+              : null,
+            verticals: rating.sourceSnapshot.verticals.map((vertical) => ({
+              ...vertical,
+              id: verticalMap.get(vertical.id) ?? vertical.id
+            })),
+            points: rating.sourceSnapshot.points.map((point) => ({
+              ...point,
+              id: pointMap.get(point.id) ?? createId('pnt')
+            })),
+            flow: rating.sourceSnapshot.flow
+              ? {
+                  ...rating.sourceSnapshot.flow,
+                  slices: rating.sourceSnapshot.flow.slices.map((slice) => ({
+                    ...slice,
+                    id: verticalMap.get(slice.id) ?? slice.id
+                  }))
+                }
+              : null
+          }
+        : rating.sourceSnapshot
+    }
+  })
+  const ratingCurves = payload.ratingCurves.map((curve) => {
+    const id = createId('crv')
+    curveMap.set(curve.id, id)
+    return {
+      ...curve,
+      id,
+      stationId: stationMap.get(curve.stationId) ?? curve.stationId,
+      fit: { ...curve.fit, lineNo: curve.lineNo, branch: curve.branch },
+      ratingIds: curve.ratingIds.map((ratingId) => ratingMap.get(ratingId) ?? ratingId),
+      previousCurveId: curve.previousCurveId ? curveMap.get(curve.previousCurveId) ?? curve.previousCurveId : null,
+      supersededByCurveId: curve.supersededByCurveId
+        ? curveMap.get(curve.supersededByCurveId) ?? curve.supersededByCurveId
+        : null
+    }
+  })
+  ratingCurves.forEach((curve) => {
+    if (!curve.previousCurveId) return
+    const previous = ratingCurves.find((item) => item.id === curve.previousCurveId)
+    if (previous) previous.supersededByCurveId = curve.id
+  })
+  const reviewBatches = payload.reviewBatches.map((batch) => {
+    const id = createId('rb')
+    batchMap.set(batch.id, id)
+    return {
+      ...batch,
+      id,
+      stationId: stationMap.get(batch.stationId) ?? batch.stationId,
+      confirmedCurveIds: batch.confirmedCurveIds.map((curveId) => curveMap.get(curveId) ?? curveId),
+      beforeRatings: batch.beforeRatings
+        .map((rating) => ratings.find((item) => item.id === ratingMap.get(rating.id)))
+        .filter((item): item is NonNullable<typeof item> => Boolean(item)),
+      beforeCurves: batch.beforeCurves
+        .map((curve) => ratingCurves.find((item) => item.id === curveMap.get(curve.id)))
+        .filter((item): item is NonNullable<typeof item> => Boolean(item)),
+      beforeCompares: batch.beforeCompares
+        .map((compare) => ({
+          ...compare,
+          id: createId('cmp'),
+          ratingId: ratingMap.get(compare.ratingId) ?? compare.ratingId,
+          curveId: compare.curveId ? curveMap.get(compare.curveId) ?? compare.curveId : null
+        })),
+      afterRatings: batch.afterRatings
+        ? batch.afterRatings
+            .map((rating) => ratings.find((item) => item.id === ratingMap.get(rating.id)))
+            .filter((item): item is NonNullable<typeof item> => Boolean(item))
+        : undefined,
+      afterCurves: batch.afterCurves
+        ? batch.afterCurves
+            .map((curve) => ratingCurves.find((item) => item.id === curveMap.get(curve.id)))
+            .filter((item): item is NonNullable<typeof item> => Boolean(item))
+        : undefined,
+      afterCompares: batch.afterCompares
+        ? batch.afterCompares.map((compare) => ({
+            ...compare,
+            id: createId('cmp'),
+            ratingId: ratingMap.get(compare.ratingId) ?? compare.ratingId,
+            curveId: compare.curveId ? curveMap.get(compare.curveId) ?? compare.curveId : null
+          }))
+        : undefined
+    }
+  })
+  ratingCurves.forEach((curve) => {
+    curve.reviewBatchId = batchMap.get(curve.reviewBatchId) ?? curve.reviewBatchId
   })
   const compares = payload.compares.map((compare) => ({
     ...compare,
     id: createId('cmp'),
-    ratingId: ratingMap.get(compare.ratingId) ?? compare.ratingId
+    ratingId: ratingMap.get(compare.ratingId) ?? compare.ratingId,
+    curveId: compare.curveId ? curveMap.get(compare.curveId) ?? compare.curveId : null
   }))
-  return { ...payload, stations, sections, verticals, points, ratings, compares }
+  return {
+    ...payload,
+    stations,
+    sections,
+    verticals,
+    points,
+    ratings,
+    ratingCurves,
+    reviewBatches,
+    compares
+  }
 }
 
 /**
@@ -186,7 +353,7 @@ export interface ConclusionLine {
 
 export function buildConclusionLines(
   payload: BackupPayload,
-  fits: Array<{ lineNo: string; valid: boolean; a: number; b: number; h0: number; meanResidualPct: number; sampleCount: number }>
+  fits: Array<{ lineNo: string; branch?: string; valid: boolean; a: number; b: number; h0: number; meanResidualPct: number; sampleCount: number }>
 ): ConclusionLine[] {
   return payload.stations.map((station) => {
     const sections = payload.sections.filter((section) => section.stationId === station.id)
@@ -199,12 +366,15 @@ export function buildConclusionLines(
     const overLimitCount = payload.compares.filter(
       (compare) => ratingIds.has(compare.ratingId) && compare.verdict === '超限'
     ).length
-    const lines = Array.from(new Set(ratings.map((rating) => rating.lineNo)))
-    const fitParts = lines.map((lineNo) => {
-      const fit = fits.find((item) => item.lineNo === lineNo)
-      if (!fit || !fit.valid) return `${lineNo} 线未定线`
-      return `${lineNo} 线 Q=${fit.a}·(H-${fit.h0})^${fit.b}，残差 ${fit.meanResidualPct}%（${fit.sampleCount} 点）`
-    })
+    const lineKeys = Array.from(new Set(ratings.map((rating) => rating.lineNo)))
+    const fitParts = lineKeys.flatMap((lineNo) =>
+      fits
+        .filter((fit) => fit.lineNo === lineNo)
+        .map((fit) => {
+          if (!fit.valid) return `${lineNo}线${fit.branch ?? ''}未定线`
+          return `${lineNo}线${fit.branch ?? ''} Q=${fit.a}·(H-${fit.h0})^${fit.b}，残差 ${fit.meanResidualPct}%（${fit.sampleCount} 点）`
+        })
+    )
     return {
       stationId: station.id,
       stationName: station.name,

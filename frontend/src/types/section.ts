@@ -1,3 +1,5 @@
+import type { RatingDirection } from './ratingDirection'
+
 /** 流量测验方法 */
 export type MeasureMethod = '流速仪' | '浮标' | 'ADCP'
 
@@ -16,6 +18,8 @@ export interface Section {
   stageM: number
   /** 流速仪 / 浮标 / ADCP */
   method: MeasureMethod
+  /** 测验时处于涨水或退水分支；历史数据可能未知 */
+  trend: RatingDirection
   /** 测流时间 */
   measuredAt: string
   createdAt: number

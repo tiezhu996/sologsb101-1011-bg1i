@@ -1,4 +1,7 @@
-/** 水位流量关系点据：参与幂函数定线的实测点 */
+import type { RatingDirection, RatingStatus } from './ratingDirection'
+import type { RatingSourceRef, RatingSourceSnapshot } from './ratingSource'
+
+/** 水位流量关系点据：参与绳套定线的实测点 */
 export interface Rating {
   id: string
   /** 所属测站 */
@@ -7,10 +10,24 @@ export interface Rating {
   stageM: number
   /** 流量（m³/s） */
   flowM3s: number
-  /** 定线号：同一定线号的点据参与同一组拟合 */
+  /** 绳套定线号：同一定线号下再按涨水/退水分支拟合 */
   lineNo: string
-  /** 点据来源测次号 */
+  /** 涨水 / 退水分支；历史数据方向不明时为未知，只能进入待确认 */
+  direction: RatingDirection
+  /** 已确认点据才参与正式定线；原始测次更新后置为 stale */
+  status: RatingStatus
+  /** 点据来源测次号（冗余，便于无快照历史数据检索） */
   measureNo: string
+  /** 当前来源定位 */
+  sourceRef?: RatingSourceRef | null
+  /** 点据形成时的断面、垂线、测点与流量快照 */
+  sourceSnapshot?: RatingSourceSnapshot | null
+  sourceSnapshotAt?: number | null
+  /** 原始测次更新原因 */
+  staleReason?: string
+  /** 最近一次确认所在曲线（涨/退水各有一条） */
+  confirmedCurveId?: string | null
+  confirmedAt?: number | null
   /** 点据时间 */
   measuredAt: string
   createdAt: number
@@ -20,6 +37,7 @@ export interface Rating {
 /** 幂函数定线结果：Q = a * (H - H0)^b */
 export interface RatingFitResult {
   lineNo: string
+  branch?: RatingDirection
   /** 系数 a */
   a: number
   /** 指数 b */
@@ -91,13 +109,15 @@ function fitWithBase(
  */
 export function fitPowerCurve(
   points: Array<{ stageM: number; flowM3s: number }>,
-  lineNo = 'A'
+  lineNo = 'A',
+  branch: RatingDirection = '涨水'
 ): RatingFitResult {
   const usable = points.filter(
     (point) => Number.isFinite(point.stageM) && Number.isFinite(point.flowM3s) && point.flowM3s > 0
   )
   const base: RatingFitResult = {
     lineNo,
+    branch,
     a: 0,
     b: 0,
     h0: 0,
@@ -146,6 +166,7 @@ export function fitPowerCurve(
   const valid = best.b > 0 && Number.isFinite(best.a)
   return {
     lineNo,
+    branch,
     a: Number(best.a.toFixed(4)),
     b: Number(best.b.toFixed(3)),
     h0: Number(best.h0.toFixed(3)),
